@@ -21,6 +21,21 @@
         .btn-mode { flex: 1; padding: 12px; font-weight: bold; border: 2px solid var(--neutral-color); border-radius: 8px; background: white; cursor: pointer; }
         .btn-mode.active { background: var(--primary-color); color: white; border-color: var(--primary-color); }
 
+        /* --- 新增：原點校正設定區 --- */
+        .calibration-container {
+            display: flex;
+            gap: 15px;
+            background: #f1f3f4;
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            font-size: 0.9rem;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .cal-group { display: flex; align-items: center; gap: 5px; }
+        .cal-input { width: 50px; padding: 5px; border: 1px solid var(--neutral-color); border-radius: 4px; text-align: center; font-size: 0.9rem; font-weight: bold; }
+
         /* --- 圓形 XY 座標控制平面 --- */
         .joystick-panel {
             position: relative;
@@ -90,6 +105,20 @@
         <button id="modeMotion" class="btn-mode" onclick="switchMode('motion')">📱 體感模式</button>
     </div>
 
+    <div class="calibration-container">
+        <span>🔧 物理原點微調：</span>
+        <div class="cal-group">
+            <label for="offsetX">X原點:</label>
+            <input type="number" id="offsetX" class="cal-input" value="90" min="60" max="120" onchange="updateOrigin()">
+            <span>°</span>
+        </div>
+        <div class="cal-group">
+            <label for="offsetY">Y原點:</label>
+            <input type="number" id="offsetY" class="cal-input" value="90" min="60" max="120" onchange="updateOrigin()">
+            <span>°</span>
+        </div>
+    </div>
+
     <div class="panel-wrapper">
         <div id="joyPanel" class="joystick-panel">
             <div class="axis-x"></div>
@@ -117,6 +146,10 @@ let txCharacteristic;
 let currentMode = 'manual'; 
 let lastSentTime = 0; 
 
+// 動態讀取自網頁輸入框的 X, Y 原點中心值（預設皆為 90）
+let centerX = 90;
+let centerY = 90;
+
 // 網頁端濾波歷史變數（專用於平滑的手機體感反應）
 let smoothX = 90;
 let smoothY = 90;
@@ -125,12 +158,21 @@ const panel = document.getElementById('joyPanel');
 const knob = document.getElementById('joyKnob');
 let isDragging = false;
 
-// 回歸中心原點
+// 當更換輸入框的原點參數時，同步更新全域變數與重置歷史紀錄
+function updateOrigin() {
+    centerX = parseInt(document.getElementById('offsetX').value) || 90;
+    centerY = parseInt(document.getElementById('offsetY').value) || 90;
+    if (!isDragging) {
+        sendCombinedData(centerX, centerY); // 立即發送新原點讓馬達就位
+    }
+}
+
+// 回歸中心原點（此處同步修改為回歸自訂的原點中心）
 function resetKnob() {
     knob.style.left = '50%';
     knob.style.top = '50%';
-    smoothX = 90;
-    smoothY = 90;
+    smoothX = centerX;
+    smoothY = centerY;
 }
 
 async function connectBLE() {
@@ -146,6 +188,9 @@ async function connectBLE() {
         document.getElementById('connectBtn').innerText = `已連線: ${bleDevice.name}`;
         document.getElementById('connectBtn').style.backgroundColor = "var(--success-color)";
         document.getElementById('mainContainer').style.borderTopColor = "var(--success-color)";
+        
+        // 連線成功後，立刻送出當前設定的原點，確保平台歸零
+        updateOrigin();
     } catch (e) {
         alert("連線失敗，請確認藍牙與 HTTPS 環境。");
     }
@@ -187,14 +232,13 @@ function handleJoystick(clientX, clientY) {
     if (currentMode !== 'manual') return;
     
     const rect = panel.getBoundingClientRect();
-    const centerX = rect.left + rect.width / 2;
-    const centerY = rect.top + rect.height / 2;
+    const centerX_pixel = rect.left + rect.width / 2;
+    const centerY_pixel = rect.top + rect.height / 2;
     
-    // 計算相對於原點 (0,0) 的位移
-    let dx = clientX - centerX;
-    let dy = clientY - centerY;
+    // 計算相對於網頁控制盤正圓心 (0,0) 的畫布位移
+    let dx = clientX - centerX_pixel;
+    let dy = clientY - centerY_pixel;
     
-    // 限制移動範圍不能超過圓圈半徑 (扣除球體自身半徑的彈性空間)
     const maxRadius = rect.width / 2 - 10;
     const distance = Math.sqrt(dx * dx + dy * dy);
     
@@ -203,18 +247,16 @@ function handleJoystick(clientX, clientY) {
         dy = (dy / distance) * maxRadius;
     }
 
-    // 更新控制球的位置
     knob.style.left = `calc(50% + ${dx}px)`;
     knob.style.top = `calc(50% + ${dy}px)`;
 
-    // 將位移比率映射轉換為角度 (40 ~ 140 度)
     let ratioX = dx / maxRadius; // -1 ~ 1
     let ratioY = dy / maxRadius; // -1 ~ 1
 
-    let targetX = Math.round(90 + (ratioX * 50));
-    let targetY = Math.round(90 + (ratioY * 50));
+    // 【修改核心】：以自訂的 centerX / centerY 為中點，向外增減 50 度範圍
+    let targetX = Math.round(centerX + (ratioX * 50));
+    let targetY = Math.round(centerY + (ratioY * 50));
 
-    // 優化限流：觸控座標限制每 30ms 傳送一次，防止高頻塞車
     let now = Date.now();
     if (now - lastSentTime > 30) {
         sendCombinedData(targetX, targetY);
@@ -225,37 +267,36 @@ function handleJoystick(clientX, clientY) {
 // 監聽觸控
 panel.addEventListener('mousedown', (e) => { isDragging = true; handleJoystick(e.clientX, e.clientY); });
 window.addEventListener('mousemove', (e) => { if (isDragging) handleJoystick(e.clientX, e.clientY); });
-window.addEventListener('mouseup', () => { if (isDragging) { isDragging = false; resetKnob(); sendCombinedData(90, 90); } });
+window.addEventListener('mouseup', () => { if (isDragging) { isDragging = false; resetKnob(); sendCombinedData(centerX, centerY); } });
 
 panel.addEventListener('touchstart', (e) => { isDragging = true; handleJoystick(e.touches[0].clientX, e.touches[0].clientY); }, {passive: true});
 window.addEventListener('touchmove', (e) => { if (isDragging) handleJoystick(e.touches[0].clientX, e.touches[0].clientY); }, {passive: false});
-window.addEventListener('touchend', () => { if (isDragging) { isDragging = false; resetKnob(); sendCombinedData(90, 90); } });
+window.addEventListener('touchend', () => { if (isDragging) { isDragging = false; resetKnob(); sendCombinedData(centerX, centerY); } });
 
 // --- 手機體感運算 (極致抗延遲優化版) ---
 function handleOrientation(event) {
     if (currentMode !== 'motion' || !txCharacteristic) return;
 
-    // 優化限流：體感限制每 45ms 傳送一次，確保底層佇列清空
     let now = Date.now();
     if (now - lastSentTime < 45) return;
 
     let rawX = Math.max(-25, Math.min(25, event.gamma)); 
     let rawY = Math.max(-25, Math.min(25, event.beta));  
 
-    let targetX = Math.round((rawX - (-25)) * (140 - 40) / (25 - (-25)) + 40);
-    let targetY = Math.round((rawY - (-25)) * (140 - 40) / (25 - (-25)) + 40);
+    // 【修改核心】：體感模式的映射中點也自動改用可調式的 centerX 與 centerY
+    let targetX = Math.round((rawX - (-25)) * ((centerX + 50) - (centerX - 50)) / (25 - (-25)) + (centerX - 50));
+    let targetY = Math.round((rawY - (-25)) * ((centerY + 50) - (centerY - 50)) / (25 - (-25)) + (centerY - 50));
 
-    // 網頁端一階低通濾波：讓反應更滑順，避免生硬跳動導致馬達過載延遲
+    // 網頁端一階低通濾波
     smoothX = smoothX + 0.35 * (targetX - smoothX);
     smoothY = smoothY + 0.35 * (targetY - smoothY);
 
     let finalX = Math.round(smoothX);
     let finalY = Math.round(smoothY);
 
-    // 體感模式下控制球同步在座標平面上滾動
     const maxRadius = (panel.getBoundingClientRect().width / 2) - 10;
-    let dispX = ((finalX - 90) / 50) * maxRadius;
-    let dispY = ((finalY - 90) / 50) * maxRadius;
+    let dispX = ((finalX - centerX) / 50) * maxRadius;
+    let dispY = ((finalY - centerY) / 50) * maxRadius;
     knob.style.left = `calc(50% + ${dispX}px)`;
     knob.style.top = `calc(50% + ${dispY}px)`;
 
@@ -263,23 +304,19 @@ function handleOrientation(event) {
     lastSentTime = now;
 }
 
-// 核心：發送 8 位元組融合資料包 (全面啟用零延遲快速通道)
+// 發送 8 位元組融合資料包
 async function sendCombinedData(angleX, angleY) {
     if (!txCharacteristic) return;
     
     let buffer = new ArrayBuffer(8);
     let view = new DataView(buffer);
     
-    // 0~3 Byte 為 X 軸，4~7 Byte 為 Y 軸
     view.setInt32(0, angleX, true);
     view.setInt32(4, angleY, true);
 
     try {
-        // 【關鍵修正】：將 writeValue 改為 writeValueWithoutResponse
-        // 這會強制藍牙不進行「交握確認(Ack)」，資料一到 ESP32 立刻執行，徹底清除排隊累積延遲
         await txCharacteristic.writeValueWithoutResponse(buffer);
     } catch (error) {
-        // 舊版瀏覽器若不支援 writeValueWithoutResponse，則自動降級回原本的發送方式
         try {
             await txCharacteristic.writeValue(buffer);
         } catch (e) {
