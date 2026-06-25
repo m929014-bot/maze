@@ -117,6 +117,10 @@ let txCharacteristic;
 let currentMode = 'manual'; 
 let lastSentTime = 0; 
 
+// 網頁端濾波歷史變數（專用於平滑的手機體感反應）
+let smoothX = 90;
+let smoothY = 90;
+
 const panel = document.getElementById('joyPanel');
 const knob = document.getElementById('joyKnob');
 let isDragging = false;
@@ -125,6 +129,8 @@ let isDragging = false;
 function resetKnob() {
     knob.style.left = '50%';
     knob.style.top = '50%';
+    smoothX = 90;
+    smoothY = 90;
 }
 
 async function connectBLE() {
@@ -208,9 +214,9 @@ function handleJoystick(clientX, clientY) {
     let targetX = Math.round(90 + (ratioX * 50));
     let targetY = Math.round(90 + (ratioY * 50));
 
-    // 每 35ms 融合打包一次，直接發送 X, Y 到同一個藍牙特徵值
+    // 優化限流：觸控座標限制每 30ms 傳送一次，防止高頻塞車
     let now = Date.now();
-    if (now - lastSentTime > 35) {
+    if (now - lastSentTime > 30) {
         sendCombinedData(targetX, targetY);
         lastSentTime = now;
     }
@@ -225,13 +231,13 @@ panel.addEventListener('touchstart', (e) => { isDragging = true; handleJoystick(
 window.addEventListener('touchmove', (e) => { if (isDragging) handleJoystick(e.touches[0].clientX, e.touches[0].clientY); }, {passive: false});
 window.addEventListener('touchend', () => { if (isDragging) { isDragging = false; resetKnob(); sendCombinedData(90, 90); } });
 
-// --- 手機體感運算 ---
+// --- 手機體感運算 (極致抗延遲優化版) ---
 function handleOrientation(event) {
     if (currentMode !== 'motion' || !txCharacteristic) return;
 
+    // 優化限流：體感限制每 45ms 傳送一次，確保底層佇列清空
     let now = Date.now();
     if (now - lastSentTime < 45) return;
-    lastSentTime = now;
 
     let rawX = Math.max(-25, Math.min(25, event.gamma)); 
     let rawY = Math.max(-25, Math.min(25, event.beta));  
@@ -239,17 +245,25 @@ function handleOrientation(event) {
     let targetX = Math.round((rawX - (-25)) * (140 - 40) / (25 - (-25)) + 40);
     let targetY = Math.round((rawY - (-25)) * (140 - 40) / (25 - (-25)) + 40);
 
+    // 網頁端一階低通濾波：讓反應更滑順，避免生硬跳動導致馬達過載延遲
+    smoothX = smoothX + 0.35 * (targetX - smoothX);
+    smoothY = smoothY + 0.35 * (targetY - smoothY);
+
+    let finalX = Math.round(smoothX);
+    let finalY = Math.round(smoothY);
+
     // 體感模式下控制球同步在座標平面上滾動
     const maxRadius = (panel.getBoundingClientRect().width / 2) - 10;
-    let dispX = ((targetX - 90) / 50) * maxRadius;
-    let dispY = ((targetY - 90) / 50) * maxRadius;
+    let dispX = ((finalX - 90) / 50) * maxRadius;
+    let dispY = ((finalY - 90) / 50) * maxRadius;
     knob.style.left = `calc(50% + ${dispX}px)`;
     knob.style.top = `calc(50% + ${dispY}px)`;
 
-    sendCombinedData(targetX, targetY); 
+    sendCombinedData(finalX, finalY); 
+    lastSentTime = now;
 }
 
-// 核心：發送 8 位元組融合資料包
+// 核心：發送 8 位元組融合資料包 (全面啟用零延遲快速通道)
 async function sendCombinedData(angleX, angleY) {
     if (!txCharacteristic) return;
     
@@ -261,9 +275,16 @@ async function sendCombinedData(angleX, angleY) {
     view.setInt32(4, angleY, true);
 
     try {
-        await txCharacteristic.writeValue(buffer);
+        // 【關鍵修正】：將 writeValue 改為 writeValueWithoutResponse
+        // 這會強制藍牙不進行「交握確認(Ack)」，資料一到 ESP32 立刻執行，徹底清除排隊累積延遲
+        await txCharacteristic.writeValueWithoutResponse(buffer);
     } catch (error) {
-        console.error("融合封包傳送失敗:", error);
+        // 舊版瀏覽器若不支援 writeValueWithoutResponse，則自動降級回原本的發送方式
+        try {
+            await txCharacteristic.writeValue(buffer);
+        } catch (e) {
+            console.error("融合封包傳送失敗:", e);
+        }
     }
 }
 </script>
