@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ESP32-C3 圓形座標控制終端</title>
+    <style>
+        :root {
+            --primary-color: #1a73e8;
+            --success-color: #34a853;
+            --neutral-color: #dadce0;
+        }
+        html, body { position: fixed; width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, sans-serif; background: #f8f9fa; margin: 0; padding: 10px; }
+        body { display: flex; justify-content: center; }
+        .container { width: 100%; max-width: 500px; background: white; padding: 20px; border-radius: 16px; box-shadow: 0 8px 24px rgba(0,0,0,0.08); border-top: 5px solid #ccc; margin-top: 10px; box-sizing: border-box; height: fit-content; }
+        h2 { text-align: center; color: #3c4043; margin-top: 0; margin-bottom: 15px; font-size: 1.3rem; }
+        
+        .btn-connect { background: var(--primary-color); color: white; width: 100%; padding: 13px; border: none; border-radius: 8px; font-size: 1.1rem; font-weight: bold; cursor: pointer; margin-bottom: 15px; }
+        
+        .mode-container { display: flex; gap: 10px; margin-bottom: 15px; }
+        .btn-mode { flex: 1; padding: 12px; font-weight: bold; border: 2px solid var(--neutral-color); border-radius: 8px; background: white; cursor: pointer; }
+        .btn-mode.active { background: var(--primary-color); color: white; border-color: var(--primary-color); }
+
+        /* --- 圓形 XY 座標控制平面 --- */
+        .joystick-panel {
+            position: relative;
+            width: 280px;
+            height: 280px;
+            background: #ffffff;
+            border: 3px solid #bdc1c6;
+            border-radius: 50%; /* 完美正圓 */
+            margin: 0 auto 15px auto;
+            touch-action: none; /* 阻斷滾頁，全面接管觸控 */
+            box-shadow: inset 0 4px 10px rgba(0,0,0,0.06), 0 4px 12px rgba(0,0,0,0.05);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* 座標軸十字線 */
+        .axis-x { position: absolute; width: 100%; height: 1px; background: #b0b3b8; left: 0; top: 50%; }
+        .axis-y { position: absolute; width: 1px; height: 100%; background: #b0b3b8; top: 0; left: 50%; }
+        
+        /* 網格虛線裝飾圈 */
+        .grid-ring { position: absolute; border: 1px dashed #dadce0; border-radius: 50%; pointer-events: none; }
+        .ring-1 { width: 33%; height: 33%; }
+        .ring-2 { width: 66%; height: 66%; }
+
+        /* 中心原點標記 */
+        .origin-dot { position: absolute; width: 6px; height: 6px; background: #70757a; border-radius: 50%; z-index: 2; }
+
+        /* 座標平面控制球 */
+        .joystick-knob {
+            position: absolute;
+            width: 46px;
+            height: 46px;
+            background: #1a73e8;
+            border: 3px solid #ffffff;
+            border-radius: 50%;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+            z-index: 10;
+            pointer-events: none; /* 事件穿透 */
+            transform: translate(-50%, -50%);
+            left: 50%; top: 50%; /* 初始位於原點 */
+        }
+
+        /* 四極方向指示文字 */
+        .indicator { position: absolute; font-size: 0.85rem; font-weight: bold; color: #5f6368; pointer-events: none; }
+        .ind-y-top    { top: -25px; left: 50%; transform: translateX(-50%); color: #e65100; }
+        .ind-y-bottom { bottom: -25px; left: 50%; transform: translateX(-50%); color: #e65100; }
+        .ind-x-left   { left: -45px; top: 50%; transform: translateY(-50%); }
+        .ind-x-right  { right: -45px; top: 50%; transform: translateY(-50%); }
+
+        /* 外圍文字包裝器（避免文字被截斷） */
+        .panel-wrapper { position: relative; width: 280px; height: 280px; margin: 30px auto 35px auto; }
+
+        .hint-banner { background: #e8f0fe; color: #1967d2; padding: 12px; border-radius: 8px; font-weight: bold; text-align: center; font-size: 0.95rem; }
+        .disabled { opacity: 0.3; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div class="container" id="mainContainer">
+    <h2>迷宮雙軸操控中心</h2>
+    
+    <button class="btn-connect" id="connectBtn" onclick="connectBLE()">🔗 連接 ESP32-C3 裝置</button>
+    
+    <div class="mode-container">
+        <button id="modeManual" class="btn-mode active" onclick="switchMode('manual')">🎯 座標原點模式</button>
+        <button id="modeMotion" class="btn-mode" onclick="switchMode('motion')">📱 體感模式</button>
+    </div>
+
+    <div class="panel-wrapper">
+        <div id="joyPanel" class="joystick-panel">
+            <div class="axis-x"></div>
+            <div class="axis-y"></div>
+            <div class="grid-ring ring-1"></div>
+            <div class="grid-ring ring-2"></div>
+            <div class="origin-dot"></div>
+            
+            <div class="indicator ind-y-top">▲ 前傾 (+Y)</div>
+            <div class="indicator ind-y-bottom">▼ 後仰 (-Y)</div>
+            <div class="indicator ind-x-left">◀ 左傾 (-X)</div>
+            <div class="indicator ind-x-right">右傾 ▶ (+X)</div>
+
+            <div id="joyKnob" class="joystick-knob"></div>
+        </div>
+    </div>
+
+    <div class="hint-banner" id="hintMsg">提示：未操作網頁時，可直接推動實體搖桿進行控制。</div>
+</div>
+
+<script>
+const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+const CHARACTERISTIC_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+let txCharacteristic;
+let currentMode = 'manual'; 
+let lastSentTime = 0; 
+
+const panel = document.getElementById('joyPanel');
+const knob = document.getElementById('joyKnob');
+let isDragging = false;
+
+// 回歸中心原點
+function resetKnob() {
+    knob.style.left = '50%';
+    knob.style.top = '50%';
+}
+
+async function connectBLE() {
+    try {
+        const bleDevice = await navigator.bluetooth.requestDevice({
+            filters: [{ namePrefix: 'ESP32_Maze_' }],
+            optionalServices: [SERVICE_UUID]
+        });
+        const server = await bleDevice.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        txCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+        
+        document.getElementById('connectBtn').innerText = `已連線: ${bleDevice.name}`;
+        document.getElementById('connectBtn').style.backgroundColor = "var(--success-color)";
+        document.getElementById('mainContainer').style.borderTopColor = "var(--success-color)";
+    } catch (e) {
+        alert("連線失敗，請確認藍牙與 HTTPS 環境。");
+    }
+}
+
+function switchMode(mode) {
+    currentMode = mode;
+    if (mode === 'manual') {
+        document.getElementById('modeManual').classList.add('active');
+        document.getElementById('modeMotion').classList.remove('active');
+        panel.classList.remove('disabled');
+        document.getElementById('hintMsg').innerText = "提示：未操作網頁時，可直接推動實體搖桿進行控制。";
+        window.removeEventListener('deviceorientation', handleOrientation);
+        resetKnob();
+    } else {
+        document.getElementById('modeManual').classList.remove('active');
+        document.getElementById('modeMotion').classList.add('active');
+        panel.classList.add('disabled');
+        document.getElementById('hintMsg').innerText = "體感運作中！傾斜手機即可控制迷宮。";
+        
+        if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+            DeviceOrientationEvent.requestPermission()
+                .then(permissionState => {
+                    if (permissionState === 'granted') {
+                        window.addEventListener('deviceorientation', handleOrientation);
+                    } else {
+                        alert("未獲得權限！");
+                        switchMode('manual');
+                    }
+                }).catch(console.error);
+        } else {
+            window.addEventListener('deviceorientation', handleOrientation);
+        }
+    }
+}
+
+// --- 圓形座標核心運算 ---
+function handleJoystick(clientX, clientY) {
+    if (currentMode !== 'manual') return;
+    
+    const rect = panel.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    
+    // 計算相對於原點 (0,0) 的位移
+    let dx = clientX - centerX;
+    let dy = clientY - centerY;
+    
+    // 限制移動範圍不能超過圓圈半徑 (扣除球體自身半徑的彈性空間)
+    const maxRadius = rect.width / 2 - 10;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    if (distance > maxRadius) {
+        dx = (dx / distance) * maxRadius;
+        dy = (dy / distance) * maxRadius;
+    }
+
+    // 更新控制球的位置
+    knob.style.left = `calc(50% + ${dx}px)`;
+    knob.style.top = `calc(50% + ${dy}px)`;
+
+    // 將位移比率映射轉換為角度 (40 ~ 140 度)
+    let ratioX = dx / maxRadius; // -1 ~ 1
+    let ratioY = dy / maxRadius; // -1 ~ 1
+
+    let targetX = Math.round(90 + (ratioX * 50));
+    let targetY = Math.round(90 + (ratioY * 50));
+
+    // 每 35ms 融合打包一次，直接發送 X, Y 到同一個藍牙特徵值
+    let now = Date.now();
+    if (now - lastSentTime > 35) {
+        sendCombinedData(targetX, targetY);
+        lastSentTime = now;
+    }
+}
+
+// 監聽觸控
+panel.addEventListener('mousedown', (e) => { isDragging = true; handleJoystick(e.clientX, e.clientY); });
+window.addEventListener('mousemove', (e) => { if (isDragging) handleJoystick(e.clientX, e.clientY); });
+window.addEventListener('mouseup', () => { if (isDragging) { isDragging = false; resetKnob(); sendCombinedData(90, 90); } });
+
+panel.addEventListener('touchstart', (e) => { isDragging = true; handleJoystick(e.touches[0].clientX, e.touches[0].clientY); }, {passive: true});
+window.addEventListener('touchmove', (e) => { if (isDragging) handleJoystick(e.touches[0].clientX, e.touches[0].clientY); }, {passive: false});
+window.addEventListener('touchend', () => { if (isDragging) { isDragging = false; resetKnob(); sendCombinedData(90, 90); } });
+
+// --- 手機體感運算 ---
+function handleOrientation(event) {
+    if (currentMode !== 'motion' || !txCharacteristic) return;
+
+    let now = Date.now();
+    if (now - lastSentTime < 45) return;
+    lastSentTime = now;
+
+    let rawX = Math.max(-25, Math.min(25, event.gamma)); 
+    let rawY = Math.max(-25, Math.min(25, event.beta));  
+
+    let targetX = Math.round((rawX - (-25)) * (140 - 40) / (25 - (-25)) + 40);
+    let targetY = Math.round((rawY - (-25)) * (140 - 40) / (25 - (-25)) + 40);
+
+    // 體感模式下控制球同步在座標平面上滾動
+    const maxRadius = (panel.getBoundingClientRect().width / 2) - 10;
+    let dispX = ((targetX - 90) / 50) * maxRadius;
+    let dispY = ((targetY - 90) / 50) * maxRadius;
+    knob.style.left = `calc(50% + ${dispX}px)`;
+    knob.style.top = `calc(50% + ${dispY}px)`;
+
+    sendCombinedData(targetX, targetY); 
+}
+
+// 核心：發送 8 位元組融合資料包
+async function sendCombinedData(angleX, angleY) {
+    if (!txCharacteristic) return;
+    
+    let buffer = new ArrayBuffer(8);
+    let view = new DataView(buffer);
+    
+    // 0~3 Byte 為 X 軸，4~7 Byte 為 Y 軸
+    view.setInt32(0, angleX, true);
+    view.setInt32(4, angleY, true);
+
+    try {
+        await txCharacteristic.writeValue(buffer);
+    } catch (error) {
+        console.error("融合封包傳送失敗:", error);
+    }
+}
+</script>
+</body>
+</html>
